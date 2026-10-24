@@ -1,0 +1,80 @@
+name: micolium-android-nightly
+
+on:
+  schedule:
+    - cron: "37 20 * * *" # zmienić na czas letni
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: nicolium/nicolium
+          ref: develop
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=nightly-$(git rev-parse HEAD:packages/micolium HEAD:packages/pl-api HEAD:pnpm-lock.yaml | sha1sum | cut -c1-12)
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 || echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.tag
+    runs-on: ubuntu-latest
+    env:
+      PNPM_CONFIG_STORE_DIR: ~/.pnpm-store
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: nicolium/nicolium
+          ref: ${{ needs.check.outputs.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .tool-versions
+      - uses: pnpm/action-setup@v6
+        with:
+          cache: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - env:
+          YARN_ENABLE_IMMUTABLE_INSTALLS: false
+        run: pnpm install --frozen-lockfile -F "micolium..."
+      - run: pnpm -F pl-api build
+
+      - working-directory: packages/micolium
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          pnpm exec expo prebuild --platform android --no-install
+          cd android
+          ./gradlew assembleRelease \
+            -Dorg.gradle.jvmargs=-Xmx8g \
+            -PreactNativeArchitectures=armeabi-v7a,arm64-v8a \
+            -Pandroid.injected.signing.store.file="$RUNNER_TEMP/release.keystore" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEYSTORE_PASSWORD"
+          mv app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/micolium-nightly.apk"
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.check.outputs.tag }}" micolium-nightly.apk \
+            -R "$GITHUB_REPOSITORY" --latest \
+            --title "nightly $(date -u +%F)"
