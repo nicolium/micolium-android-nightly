@@ -2,7 +2,8 @@ name: micolium-android-nightly
 
 on:
   schedule:
-    - cron: "37 20 * * *" # zmienić na czas letni
+    - cron: "37 21 * * *"
+      timezone: "Europe/Warsaw"
   workflow_dispatch:
 
 permissions:
